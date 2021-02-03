@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use cdrs_tokio::{
   types::{ IntoRustByName },
   query::*,
@@ -49,7 +48,7 @@ fn get_query_and_values(prefix: &str, topic: &str) -> (&'static str, QueryValues
   }
 }
 
-pub async fn get_retain_message(topic: &str, session: &StorageSession) -> Result<HashMap<String, String>> {
+pub async fn get_retain_message(topic: &str, session: &StorageSession) -> Result<Vec<(String, String)>> {
   let prefix = utils::get_prefix(topic);
   let (query, values) = get_query_and_values(prefix, topic);
   let messages = session.query_with_values(query, values).await
@@ -60,11 +59,11 @@ pub async fn get_retain_message(topic: &str, session: &StorageSession) -> Result
         .ok_or(Error::from("cannot get rows from a response body"))
     })
     .and_then(|rows| {
-      let mut messages = HashMap::new();
+      let mut messages = Vec::new();
       for row in rows {
         let topic: String = row.get_by_name("topic").unwrap().unwrap();
         let message: String = row.get_by_name("message").unwrap().unwrap();
-        messages.insert(topic, message);
+        messages.push((topic, message));
       }
       Ok(messages)
     })?;

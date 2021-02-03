@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use cdrs_tokio::{
   types::{ IntoRustByName },
   query::*,
@@ -28,7 +27,7 @@ pub static SELECT_PACKET_QUERY: &'static str = r#"
   WHERE client_id = ?
 "#;
 
-pub async fn get_packets_for_client(client_id: &str, session: &StorageSession) -> Result<HashMap<u16, (String, String)>> {
+pub async fn get_packets_for_client(client_id: &str, session: &StorageSession) -> Result<Vec<(u16, String, String)>> {
   let values = query_values!(client_id);
   let packets = session
     .query_with_values(SELECT_PACKET_QUERY, values).await
@@ -39,12 +38,12 @@ pub async fn get_packets_for_client(client_id: &str, session: &StorageSession) -
         .ok_or(Error::from("cannot get rows from a response body"))
     })
     .and_then(|rows| {
-      let mut packets = HashMap::new();
+      let mut packets = Vec::new();
       for row in rows {
         let packet_id: i32 = row.get_by_name("packet_id").unwrap().unwrap();
         let topic: String = row.get_by_name("topic").unwrap().unwrap();
         let message: String = row.get_by_name("message").unwrap().unwrap();
-        packets.insert(packet_id as u16, (topic, message));
+        packets.push((packet_id as u16, topic, message));
       }
       Ok(packets)
     })?;

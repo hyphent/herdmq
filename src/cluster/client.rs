@@ -1,7 +1,8 @@
 use tokio_util::codec::Framed;
 use std::{
   collections::{HashMap, HashSet},
-  sync::Arc
+  sync::Arc,
+  env
 };
 
 use tokio::{
@@ -201,9 +202,17 @@ struct ClusterConnection {
 }
 
 impl ClusterConnection {
+  fn get_credentials() -> (String, String) {
+    let username = env::var("CLUSTER_USERNAME").unwrap_or("admin".to_owned());
+    let password = env::var("CLUSTER_PASSWORD").unwrap_or("password".to_owned());
+    (username, password)
+  }
+
   async fn initiate_handshake(socket: TcpStream, client_id: &str, routing_table: Arc<Mutex<HashMap<String, HashSet<String>>>>, trie: Arc<Mutex<TopicTrie>>) -> Result<Self> {
 
     let mut stream = Framed::new(socket, MQTTCodec {});
+
+    let (username, password) = Self::get_credentials();
 
     stream.send(DecodedPacket::Connect(ConnectPacket {
       client_id: client_id.to_owned(),
@@ -213,8 +222,8 @@ impl ClusterConnection {
 
       keep_alive: PING_INTERVAL, 
 
-      username: Some("admin".to_owned()),
-      password: Some("password".to_owned()),
+      username: Some(username),
+      password: Some(password),
 
       properties: vec![]
     })).await?;
@@ -263,6 +272,12 @@ impl ClusterConnection {
       DecodedPacket::Connect(packet) => packet,
       _ => return Err(Error::FormatError)
     };
+
+    let (username, password) = Self::get_credentials();
+
+    if connect_packet.username != Some(username) || connect_packet.password != Some(password) {
+      return Err(Error::NotAuthorized);
+    }
 
     let routing_table = json!(routing_table.lock().await.clone());
 

@@ -227,7 +227,7 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
 
       let packets = self.storage.get_packets_for_client(&client_id).await?; 
       
-      for (packet_id, (topic, message)) in &packets {
+      for (packet_id, topic, message) in &packets {
         self.send_to_client(&client_id, DecodedPacket::Publish(PublishPacket {
           topic: topic.to_owned(),
           packet_id: Some(*packet_id),

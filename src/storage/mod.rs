@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use mqtt_codec::types::SubscriptionConfig;
 
 use cdrs_tokio::{
@@ -65,7 +64,7 @@ impl Storage {
   }
 
   // Get the retain message for the given topic
-  pub async fn get_retain_message(&self, topic: &str) -> Result<HashMap<String, String>> {
+  pub async fn get_retain_message(&self, topic: &str) -> Result<Vec<(String, String)>> {
     query::retain::get_retain_message(topic, &self.session).await
   }
 
@@ -80,7 +79,7 @@ impl Storage {
   }
 
   // Get all the packets for the client
-  pub async fn get_packets_for_client(&self, client_id: &str) -> Result<HashMap<u16, (String, String)>> {
+  pub async fn get_packets_for_client(&self, client_id: &str) -> Result<Vec<(u16, String, String)>> {
     query::packet::get_packets_for_client(client_id, &self.session).await
   }
 
