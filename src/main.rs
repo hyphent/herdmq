@@ -5,8 +5,11 @@ mod connection;
 mod storage;
 mod trie;
 mod authenticator;
+mod cluster;
 
 use tokio::runtime;
+use getopts::Options;
+use uuid::Uuid;
 
 use crate::{
   broker::Broker,
@@ -15,30 +18,71 @@ use crate::{
   types::ClientCredential
 };
 
-fn authenticate_connection(client_credential: &ClientCredential) -> bool {
+
+const BROKER_PREFIX: &'static str = "$herdmq";
+
+fn authenticate_connect(_client_credential: &ClientCredential) -> bool {
   true
 }
 
-fn authenticate_subscribe(client_credential: &ClientCredential, topic: &str) -> bool {
-  topic.split('/').collect::<Vec<&str>>()[0] != "$herdmq"
+fn authenticate_subscribe(_client_credential: &ClientCredential, _topic: &str) -> bool {
+  true
 }
 
-fn authenticate_publish(client_credential: &ClientCredential, topic: &str) -> bool {
-  topic.split('/').collect::<Vec<&str>>()[0] != "$herdmq"
+fn authenticate_publish(_client_credential: &ClientCredential, _topic: &str) -> bool {
+  true
+}
+
+fn print_usage(program: &str, opts: Options) {
+  let brief = format!("Usage: {} [options]", program);
+  print!("{}", opts.usage(&brief));
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+  let args: Vec<String> = std::env::args().collect();
+  let program = args[0].clone();
+
+  let mut opts = Options::new();
+
+  opts.optopt("p", "port", "port for the herdmq instance", "port");
+  opts.optopt("c", "cluster", "port for cluster client", "port");
+  opts.optopt("s", "seeds", "seeds for discovering herdmq cluster", "url");
+  opts.optflag("h", "help", "print this help menu");
+
+  let matches = match opts.parse(&args[1..]) {
+    Ok(m) => { m }
+    Err(f) => { panic!(f.to_string()) }
+  };
+
+  if matches.opt_present("h") {
+    print_usage(&program, opts);
+    return Ok(());
+  }
+
+  let seeds = match matches.opt_str("s") {
+    Some(seeds) => seeds.split(',').map(|seed| seed.to_owned()).collect(),
+    None => vec![]
+  };
+  let port = match matches.opt_str("p") {
+    Some(port) => port.parse::<u16>().unwrap(),
+    None => 1883
+  };
+  let cluster_port = match matches.opt_str("c") {
+    Some(port) => port.parse::<u16>().unwrap(),
+    None => 3883
+  };
+
   let rt = runtime::Runtime::new()?;
 
   rt.block_on(async {
-    let broker_url = std::env::var("BROKER_URL").ok().unwrap_or("0.0.0.0:1883".to_owned());
-
-    let broker_id = "hello";
-    let authenticator = Authenticator::new(authenticate_connection, authenticate_subscribe, authenticate_publish);
+    let broker_id = format!("{}_{}", BROKER_PREFIX, Uuid::new_v4().to_string());
+    let authenticator = Authenticator::new(authenticate_connect, authenticate_subscribe, authenticate_publish);
     let storage = Storage::new(Vec::from(["127.0.0.1:9042", "127.0.0.1:9043"])).await.unwrap();
 
     let broker = Broker::new(broker_id, authenticator, storage);
-    broker.run(broker_url).await.unwrap()
+
+    broker.run(("0.0.0.0", port), ("0.0.0.0", cluster_port), seeds).await.unwrap();
   });
+  
   Ok(())
 }

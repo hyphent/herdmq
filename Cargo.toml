@@ -10,7 +10,12 @@ edition = "2018"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.6.0", features = ["codec"] }
 futures-util = { version = "0.3.8", features = ["sink"] }
-mqtt-codec = { git = "https://github.com/hyphent/mqtt-codec" }
+mqtt-codec = { git = "https://github.com/hyphent/mqtt-codec", tag = "v0.1.1" }
 bytes = "1.0.1"
 rand = "0.8.2"
 cdrs-tokio = "2.0.0"
+regex = "1"
+getopts = "0.2"
+uuid = { version = "0.8", features = ["v4"] }
+mqtt-client = { path = "../mqtt-client" }
+serde_json = "1.0"

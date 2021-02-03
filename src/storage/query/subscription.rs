@@ -12,22 +12,21 @@ use crate::types::{Result, StorageSession};
 
 static CREATE_SUBSCRIPTION_BY_TOPIC_TABLE_QUERY: &'static str = r#"
   CREATE TABLE IF NOT EXISTS herdmq.subscription_topic (
-    topic_name text,
+    topic text,
     client_id text,
-    retain boolean,
     rap boolean,
     nl boolean,
     qos int,
-    PRIMARY KEY(topic_name, client_id)
+    PRIMARY KEY(topic, client_id)
   );
 "#;
 
 static CREATE_SUBSCRIPTION_BY_CLIENT_ID_TABLE_QUERY: &'static str = r#"
   CREATE TABLE IF NOT EXISTS herdmq.subscription_client (
-    topic_name text,
+    topic text,
     client_id text,
     qos int,
-    PRIMARY KEY(client_id, topic_name)
+    PRIMARY KEY(client_id, topic)
   );
 "#;
 
@@ -37,28 +36,27 @@ pub async fn initialize(session: &StorageSession) -> Result<()> {
   Ok(())
 }
 
-fn get_topic_alias(topic_name: &str) -> Vec<String> {
+fn get_topic_alias(topic: &str) -> Vec<String> {
   let mut topic_alias = Vec::new();
   let mut topic_buffer = "".to_owned();
-  for subtopic in topic_name.split('/') {
+  for subtopic in topic.split('/') {
     topic_buffer = format!("{}{}/", topic_buffer, subtopic);
-    topic_alias.push(match topic_buffer == format!("{}/", topic_name) {
-      true => topic_name.to_owned(),
+    topic_alias.push(match topic_buffer == format!("{}/", topic) {
+      true => topic.to_owned(),
       false => format!("{}#", topic_buffer)
     });
   }
   topic_alias
 }
 
-fn row_to_subscription(row: Row, topic_name: &str) -> SubscriptionConfig {
-  let retain = row.get_by_name("retain").unwrap().unwrap();
+fn row_to_subscription(row: Row, topic: &str) -> SubscriptionConfig {
   let rap = row.get_by_name("rap").unwrap().unwrap();
   let nl = row.get_by_name("nl").unwrap().unwrap();
   let qos: i32 = row.get_by_name("qos").unwrap().unwrap();
 
   SubscriptionConfig {
-    topic_name: topic_name.to_owned(),
-    retain: retain,
+    topic: topic.to_owned(),
+    retain_handling: 0,
     rap: rap,
     nl: nl,
     qos: qos as u8
@@ -67,11 +65,11 @@ fn row_to_subscription(row: Row, topic_name: &str) -> SubscriptionConfig {
 
 static SELECT_SUBSCRIPTIONS_QUERY: &'static str = r#"
   SELECT * FROM herdmq.subscription_topic
-  WHERE topic_name IN ?
+  WHERE topic IN ?
 "#;
 
-pub async fn find_subscriptions(topic_name: &str, session: &StorageSession) -> Result<Vec<(String, SubscriptionConfig)>> {
-  let topic_alias = get_topic_alias(topic_name);
+pub async fn find_subscriptions(topic: &str, session: &StorageSession) -> Result<Vec<(String, SubscriptionConfig)>> {
+  let topic_alias = get_topic_alias(topic);
   let values = query_values!(topic_alias);
   let subscriptions = session.query_with_values(SELECT_SUBSCRIPTIONS_QUERY, values).await
     .and_then(|res| res.get_body())
@@ -85,7 +83,7 @@ pub async fn find_subscriptions(topic_name: &str, session: &StorageSession) -> R
 
       for row in rows {
         let client_id = row.get_by_name("client_id").unwrap().unwrap();
-        let subscription_config = row_to_subscription(row, topic_name);
+        let subscription_config = row_to_subscription(row, topic);
         subscriptions.push((client_id, subscription_config));
       }
 
@@ -113,9 +111,9 @@ pub async fn find_client_subscriptions(client_id: &str, session: &StorageSession
       let mut subscriptions = Vec::with_capacity(rows.len());
       
       for row in rows {
-        let topic_name = row.get_by_name("topic_name").unwrap().unwrap();
+        let topic = row.get_by_name("topic").unwrap().unwrap();
         let qos: i32 = row.get_by_name("qos").unwrap().unwrap();
-        subscriptions.push((topic_name, qos as u8));
+        subscriptions.push((topic, qos as u8));
       }
 
       Ok(subscriptions)
@@ -125,23 +123,22 @@ pub async fn find_client_subscriptions(client_id: &str, session: &StorageSession
 
 static UPDATE_SUBSCRIPTION_QUERY: &'static str = r#"
   UPDATE herdmq.subscription_topic
-  SET retain = ?,
-    rap = ?,
+  SET rap = ?,
     nl = ?,
     qos = ?
-  WHERE client_id = ? AND topic_name = ?
+  WHERE client_id = ? AND topic = ?
 "#;
 
 static UPDATE_CLIENT_SUBSCRIPTION_QUERY: &'static str = r#"
-  INSERT INTO herdmq.subscription_client (client_id, topic_name, qos) VALUES (?, ?, ?);
+  INSERT INTO herdmq.subscription_client (client_id, topic, qos) VALUES (?, ?, ?);
 "#;
 
 pub async fn store_subscriptions(client_id: &str, subscriptions: &Vec<SubscriptionConfig>, session: &StorageSession) -> Result<()> {
   for subscription in subscriptions {
-    let values = query_values!(subscription.retain, subscription.rap, subscription.nl, subscription.qos as i32, client_id, subscription.topic_name.to_owned());
+    let values = query_values!(subscription.rap, subscription.nl, subscription.qos as i32, client_id, subscription.topic.to_owned());
     session.query_with_values(UPDATE_SUBSCRIPTION_QUERY, values).await?;
     
-    let values_for_client = query_values!(client_id, subscription.topic_name.to_owned(), subscription.qos as i32);
+    let values_for_client = query_values!(client_id, subscription.topic.to_owned(), subscription.qos as i32);
     session.query_with_values(UPDATE_CLIENT_SUBSCRIPTION_QUERY, values_for_client).await?;
   }
   Ok(())
@@ -149,17 +146,17 @@ pub async fn store_subscriptions(client_id: &str, subscriptions: &Vec<Subscripti
 
 static REMOVE_SUBSCRIPTION_QUERY: &'static str = r#"
   DELETE FROM herdmq.subscription_topic
-  WHERE client_id = ? AND topic_name = ?
+  WHERE client_id = ? AND topic = ?
 "#;
 
 static REMOVE_CLIENT_SUBSCRIPTION_QUERY: &'static str = r#"
   DELETE FROM herdmq.subscription_client
-  where client_id = ? AND topic_name = ?
+  where client_id = ? AND topic = ?
 "#;
 
-pub async fn remove_subscriptions(client_id: &str, topic_names: &Vec<String>, session: &StorageSession) -> Result<()> {
-  for topic_name in topic_names {
-    let values = query_values!(client_id, topic_name.to_owned());
+pub async fn remove_subscriptions(client_id: &str, topics: &Vec<String>, session: &StorageSession) -> Result<()> {
+  for topic in topics {
+    let values = query_values!(client_id, topic.to_owned());
     session.query_with_values(REMOVE_SUBSCRIPTION_QUERY, values.clone()).await?;
     session.query_with_values(REMOVE_CLIENT_SUBSCRIPTION_QUERY, values).await?;
   }
@@ -168,7 +165,7 @@ pub async fn remove_subscriptions(client_id: &str, topic_names: &Vec<String>, se
 
 static REMOVE_ALL_SUBSCRIPTIONS_QUERY: &'static str = r#"
   DELETE FROM herdmq.subscription_topic
-  WHERE topic_name IN ?
+  WHERE topic IN ?
 "#;
 
 static REMOVE_ALL_CLIENT_SUBSCRIPTIONS_QUERY: &'static str = r#"
@@ -178,7 +175,7 @@ static REMOVE_ALL_CLIENT_SUBSCRIPTIONS_QUERY: &'static str = r#"
 
 pub async fn remove_all_subscriptions(client_id: &str, session: &StorageSession) -> Result<()> {
   let values_for_client = query_values!(client_id);
-  let topic_names = session
+  let topics = session
     .query_with_values(SELECT_CLIENT_SUBSCRIPTION_QUERY, values_for_client.clone()).await
     .and_then(|res| res.get_body())
     .and_then(|body| {
@@ -187,15 +184,15 @@ pub async fn remove_all_subscriptions(client_id: &str, session: &StorageSession)
         .ok_or(Error::from("cannot get rows from a response body"))
     })
     .and_then(|rows| {
-      let mut topic_names = Vec::new();
+      let mut topics = Vec::new();
       for row in rows {
-        let topic_name: String = row.get_by_name("topic_name").unwrap().unwrap();
-        topic_names.push(topic_name);
+        let topic: String = row.get_by_name("topic").unwrap().unwrap();
+        topics.push(topic);
       }
-      Ok(topic_names)
+      Ok(topics)
     })?;
 
-  let values = query_values!(topic_names);
+  let values = query_values!(topics);
   session.query_with_values(REMOVE_ALL_SUBSCRIPTIONS_QUERY, values).await?;
   session.query_with_values(REMOVE_ALL_CLIENT_SUBSCRIPTIONS_QUERY, values_for_client).await?;
   Ok(())

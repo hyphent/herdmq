@@ -31,17 +31,17 @@ impl Storage {
 
     println!("Connecting to {:?} for CDRS...", urls);
     let mut session = session::new(&cluster_config, RoundRobin::new()).await?;
-    println!("CDRS connection to {:?} successful", urls);
 
     // prepare database
     query::initialize(&mut session).await?;
+    println!("CDRS connection to {:?} successful", urls);
 
     Ok(Storage { session })
   }
 
   // Finds existing subscriptions given the topic name and returns a vector of client_id and subscription config.
-  pub async fn find_subscriptions(&self, topic_name: &str) -> Result<Vec<(String, SubscriptionConfig)>> {
-    query::subscription::find_subscriptions(topic_name, &self.session).await
+  pub async fn find_subscriptions(&self, topic: &str) -> Result<Vec<(String, SubscriptionConfig)>> {
+    query::subscription::find_subscriptions(topic, &self.session).await
   }
 
   // Find existing subscriptions for a client
@@ -55,8 +55,8 @@ impl Storage {
   }
 
   // Remove existing subscriptions given the topic name for the client.
-  pub async fn remove_subscriptions(&self, client_id: &str, topic_names: &Vec<String>) -> Result<()> {
-    query::subscription::remove_subscriptions(client_id, topic_names, &self.session).await
+  pub async fn remove_subscriptions(&self, client_id: &str, topics: &Vec<String>) -> Result<()> {
+    query::subscription::remove_subscriptions(client_id, topics, &self.session).await
   }
   
   // Remove all the subscriptions for the given client;
@@ -65,18 +65,18 @@ impl Storage {
   }
 
   // Get the retain message for the given topic
-  pub async fn get_retain_message(&self, topic_name: &str) -> Result<HashMap<String, String>> {
-    query::retain::get_retain_message(topic_name, &self.session).await
+  pub async fn get_retain_message(&self, topic: &str) -> Result<HashMap<String, String>> {
+    query::retain::get_retain_message(topic, &self.session).await
   }
 
   // Store a retain message for the given topic
-  pub async fn store_retain_message(&self, topic_name: &str, message: &str) -> Result<()> {
-    query::retain::store_retain_message(topic_name, message, &self.session).await
+  pub async fn store_retain_message(&self, topic: &str, message: &str) -> Result<()> {
+    query::retain::store_retain_message(topic, message, &self.session).await
   }
 
   // Remove retain message for the given topic
-  pub async fn remove_retain_message(&self, topic_name: &str) -> Result<()> {
-    query::retain::remove_retain_message(topic_name, &self.session).await
+  pub async fn remove_retain_message(&self, topic: &str) -> Result<()> {
+    query::retain::remove_retain_message(topic, &self.session).await
   }
 
   // Get all the packets for the client
@@ -85,8 +85,8 @@ impl Storage {
   }
 
   // Store a new packet for the client
-  pub async fn store_packet_for_client(&self, client_id: &str, topic_name: &str, message: &str, packet_id: u16) -> Result<()> {
-    query::packet::store_packet_for_client(client_id, topic_name, message, packet_id, &self.session).await
+  pub async fn store_packet_for_client(&self, client_id: &str, topic: &str, message: &str, packet_id: u16) -> Result<()> {
+    query::packet::store_packet_for_client(client_id, topic, message, packet_id, &self.session).await
   }
 
   // Remove packet for the client

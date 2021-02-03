@@ -12,9 +12,9 @@ use super::utils;
 static CREATE_RETAIN_TABLE_QUERY: &'static str = r#"
   CREATE TABLE IF NOT EXISTS herdmq.retain (
     prefix text,
-    topic_name text,
+    topic text,
     message text,
-    PRIMARY KEY(prefix, topic_name)
+    PRIMARY KEY(prefix, topic)
   );
 "#;
 
@@ -25,20 +25,20 @@ pub async fn initialize(session: &StorageSession) -> Result<()> {
 
 pub static SELECT_RETAIN_QUERY: &'static str = r#"
   SELECT * FROM herdmq.retain
-  WHERE prefix = ? AND topic_name = ?
+  WHERE prefix = ? AND topic = ?
 "#;
 
 pub static SELECT_RETAIN_WILD_CARD_QUERY: &'static str = r#"
   SELECT * FROM herdmq.retain
-  WHERE prefix = ? AND topic_name > ? AND topic_name < ?;
+  WHERE prefix = ? AND topic > ? AND topic < ?;
 "#;
 
-fn get_query_and_values(prefix: &str, topic_name: &str) -> (&'static str, QueryValues) {
-  let default = (SELECT_RETAIN_QUERY, query_values!(prefix, topic_name));
+fn get_query_and_values(prefix: &str, topic: &str) -> (&'static str, QueryValues) {
+  let default = (SELECT_RETAIN_QUERY, query_values!(prefix, topic));
 
-  match topic_name.find("/#") {
-    Some(x) if x == topic_name.len() - 2 => {
-      let mut topic = topic_name.to_owned();
+  match topic.find("/#") {
+    Some(x) if x == topic.len() - 2 => {
+      let mut topic = topic.to_owned();
       topic.pop();
       let start = format!("{}", topic);
       topic.pop();
@@ -49,9 +49,9 @@ fn get_query_and_values(prefix: &str, topic_name: &str) -> (&'static str, QueryV
   }
 }
 
-pub async fn get_retain_message(topic_name: &str, session: &StorageSession) -> Result<HashMap<String, String>> {
-  let prefix = utils::get_prefix(topic_name);
-  let (query, values) = get_query_and_values(prefix, topic_name);
+pub async fn get_retain_message(topic: &str, session: &StorageSession) -> Result<HashMap<String, String>> {
+  let prefix = utils::get_prefix(topic);
+  let (query, values) = get_query_and_values(prefix, topic);
   let messages = session.query_with_values(query, values).await
     .and_then(|res| res.get_body())
     .and_then(|body| {
@@ -62,9 +62,9 @@ pub async fn get_retain_message(topic_name: &str, session: &StorageSession) -> R
     .and_then(|rows| {
       let mut messages = HashMap::new();
       for row in rows {
-        let topic_name: String = row.get_by_name("topic_name").unwrap().unwrap();
+        let topic: String = row.get_by_name("topic").unwrap().unwrap();
         let message: String = row.get_by_name("message").unwrap().unwrap();
-        messages.insert(topic_name, message);
+        messages.insert(topic, message);
       }
       Ok(messages)
     })?;
@@ -75,22 +75,22 @@ pub async fn get_retain_message(topic_name: &str, session: &StorageSession) -> R
 pub static UPDATE_RETAIN_QUERY: &'static str = r#"
   UPDATE herdmq.retain
   SET message = ?
-  WHERE prefix = ? AND topic_name = ?
+  WHERE prefix = ? AND topic = ?
 "#;
 
-pub async fn store_retain_message(topic_name: &str, message: &str, session: &StorageSession) -> Result<()> {
-  let values = query_values!(message, utils::get_prefix(topic_name), topic_name);
+pub async fn store_retain_message(topic: &str, message: &str, session: &StorageSession) -> Result<()> {
+  let values = query_values!(message, utils::get_prefix(topic), topic);
   session.query_with_values(UPDATE_RETAIN_QUERY, values).await?;
   Ok(())
 }
 
 pub static REMOVE_RETAIN_QUERY: &'static str = r#"
   DELETE FROM herdmq.retain
-  WHERE prefix = ? AND topic_name = ?
+  WHERE prefix = ? AND topic = ?
 "#;
 
-pub async fn remove_retain_message(topic_name: &str, session: &StorageSession) -> Result<()> {
-  let values = query_values!(utils::get_prefix(topic_name), topic_name);
+pub async fn remove_retain_message(topic: &str, session: &StorageSession) -> Result<()> {
+  let values = query_values!(utils::get_prefix(topic), topic);
   session.query_with_values(REMOVE_RETAIN_QUERY, values).await?;
   Ok(())
 }

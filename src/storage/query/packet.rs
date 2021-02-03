@@ -12,7 +12,7 @@ static CREATE_PACKET_TABLE_QUERY: &'static str = r#"
   CREATE TABLE IF NOT EXISTS herdmq.packet (
     client_id text,
     packet_id int,
-    topic_name text,
+    topic text,
     message text,
     PRIMARY KEY(client_id, packet_id)
   );
@@ -42,9 +42,9 @@ pub async fn get_packets_for_client(client_id: &str, session: &StorageSession) -
       let mut packets = HashMap::new();
       for row in rows {
         let packet_id: i32 = row.get_by_name("packet_id").unwrap().unwrap();
-        let topic_name: String = row.get_by_name("topic_name").unwrap().unwrap();
+        let topic: String = row.get_by_name("topic").unwrap().unwrap();
         let message: String = row.get_by_name("message").unwrap().unwrap();
-        packets.insert(packet_id as u16, (topic_name, message));
+        packets.insert(packet_id as u16, (topic, message));
       }
       Ok(packets)
     })?;
@@ -53,13 +53,13 @@ pub async fn get_packets_for_client(client_id: &str, session: &StorageSession) -
 
 pub static UPDATE_PACKET_QUERY: &'static str = r#"
   UPDATE herdmq.packet  
-  SET topic_name = ?,
+  SET topic = ?,
     message = ?
   WHERE client_id = ? AND packet_id = ?
 "#;
 
-pub async fn store_packet_for_client(client_id: &str, topic_name: &str, message: &str, packet_id: u16, session: &StorageSession) -> Result<()> {
-  let values = query_values!(topic_name, message, client_id, packet_id as i32);
+pub async fn store_packet_for_client(client_id: &str, topic: &str, message: &str, packet_id: u16, session: &StorageSession) -> Result<()> {
+  let values = query_values!(topic, message, client_id, packet_id as i32);
   session.query_with_values(UPDATE_PACKET_QUERY, values).await?;
   Ok(())
 }

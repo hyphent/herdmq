@@ -4,7 +4,7 @@ use std::{
 };
 
 use tokio::{
-  net::{ToSocketAddrs, TcpListener},
+  net::{TcpListener, ToSocketAddrs},
   sync::{
     Mutex,
     mpsc::{channel, Sender, Receiver}
@@ -18,14 +18,13 @@ use mqtt_codec::types::*;
 use crate::{
   types::{Result, Error, ClientCredential},
   connection::Connection,
+  cluster::ClusterClient,
   storage::Storage,
-  trie::TopicTrie,
   error::HerdMQError,
   authenticator::Authenticator
 };
 
 const CHANNEL_CAPACITY: usize = 100;
-// const BROKER_PREFIX: &'static str = "herdmq_";
 
 type Session = (Sender<DecodedPacket>, Option<WillConfig>, ClientCredential);
 
@@ -33,20 +32,20 @@ pub struct Broker<C, S, P>
 where 
 C: Fn(&ClientCredential) -> bool + Sync + Send + 'static, 
 S: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
-P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
+P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
 {
-  id: &'static str,
+  id: String,
   authenticator: Authenticator<C, S, P>,
   storage: Storage
 }
 
-impl <C,S,P> Broker <C, S, P>
+impl <C, S, P> Broker <C, S, P>
 where 
 C: Fn(&ClientCredential) -> bool + Sync + Send + 'static, 
 S: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
-P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
+P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
 {
-  pub fn new(id: &'static str, authenticator: Authenticator<C, S, P>, storage: Storage) -> Self {
+  pub fn new(id: String, authenticator: Authenticator<C, S, P>, storage: Storage) -> Self {
     Broker {
       id,
       authenticator,
@@ -54,15 +53,14 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
     }
   }
 
-  async fn listen(self, mut rx: Receiver<(String, BrokerMessage)>) -> Result<()> {
+  async fn listen(self, mut rx: Receiver<(String, BrokerMessage)>, cluster_client: Arc<ClusterClient>) -> Result<()> {
     let broker_handler = BrokerHandler {
       broker_id: Arc::new(self.id),
       authenticator: Arc::new(self.authenticator),
-      trie: Arc::new(Mutex::new(TopicTrie::new())),
       subscription_table: Arc::new(Mutex::new(HashMap::new())),
-      routing_table: Arc::new(Mutex::new(HashMap::new())),
       sessions: Arc::new(Mutex::new(HashMap::new())),
-      storage: Arc::new(self.storage)
+      storage: Arc::new(self.storage),
+      cluster_client
     };
 
     let broker_handler = Arc::new(broker_handler);
@@ -77,16 +75,37 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
     Ok(())
   }
 
-  pub async fn run<T: ToSocketAddrs>(self, url: T) -> Result<()> {
-    let listener = TcpListener::bind(url).await.unwrap();
+  pub async fn run<A: ToSocketAddrs, B: 'static + ToSocketAddrs + Send, T: ToSocketAddrs>(self, url: A, cluster_url: B, seeds: Vec<T>) -> Result<()> {
+    let cluster_client = Arc::new(ClusterClient::new(&self.id));
+    let cluster_runner = cluster_client.clone();
+    let cluster_handler = cluster_client.clone();
+
     let (tx, rx) = channel(CHANNEL_CAPACITY);
+    let cloned_tx = tx.clone();
 
     tokio::spawn(async move {
-      self.listen(rx).await.unwrap();
+      cluster_runner.run(cluster_url).await.unwrap();
+    });
+
+    tokio::spawn(async move {
+      cluster_handler.handle_message(cloned_tx).await.unwrap();
+    });
+    
+    if seeds.len() > 0 {
+      for seed in seeds {
+        cluster_client.connect(seed).await?;
+      }
+    }
+
+    println!("HerdMQ is ready!!");
+    let listener = TcpListener::bind(url).await.unwrap();
+
+    tokio::spawn(async move {
+      self.listen(rx, cluster_client).await.unwrap();
     });
 
     loop {
-      let (socket, addr) = listener.accept().await.unwrap();
+      let (socket, _addr) = listener.accept().await.unwrap();
       let tx = tx.clone();
       tokio::spawn(async move {
         let connection = Connection::handle_handshake(socket, tx).await.unwrap();
@@ -100,67 +119,37 @@ pub struct BrokerHandler<C, S, P>
 where
 C: Fn(&ClientCredential) -> bool + Sync + Send + 'static, 
 S: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
-P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
+P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
 {
-  broker_id: Arc<&'static str>,
+  broker_id: Arc<String>,
   authenticator: Arc<Authenticator<C, S, P>>,
   sessions: Arc<Mutex<HashMap<String, Session>>>,
   subscription_table: Arc<Mutex<HashMap<String, HashMap<String, u8>>>>,
-  routing_table: Arc<Mutex<HashMap<String, HashSet<String>>>>,
-  trie: Arc<Mutex<TopicTrie>>,
-  storage: Arc<Storage>
+  storage: Arc<Storage>,
+  cluster_client: Arc<ClusterClient>
 }
 
 impl <C, S, P> BrokerHandler<C, S, P>
 where
 C: Fn(&ClientCredential) -> bool + Sync + Send + 'static, 
 S: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
-P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
+P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
 {
-  async fn insert_broker_subscription(&self, topic_name: &str, broker_id: &str) -> bool {
-    let mut table = self.routing_table.lock().await;
-    let set = table.entry(topic_name.to_owned()).or_insert(HashSet::new());
-    if !set.contains(broker_id) {
-      set.insert(broker_id.to_owned());
-      self.trie.lock().await.insert(topic_name, broker_id);
-      true
-    } else {
-      false
-    }
-  }
-
-  async fn insert_client_subscription(&self, topic_name: &str, client_id: &str, qos: u8) {
+  async fn insert_client_subscription(&self, topic: &str, client_id: &str, qos: u8) -> bool {
     let mut table = self.subscription_table.lock().await;
-    let map = table.entry(topic_name.to_owned()).or_insert(HashMap::new());
+    let map = table.entry(topic.to_owned()).or_insert(HashMap::new());
+    let new_topic = map.is_empty();
     map.insert(client_id.to_owned(), qos);
+    new_topic
   }
-
-  async fn remove_broker_subscription(&self, topic_name: &str, broker_id: &str) {
-    let mut table = self.routing_table.lock().await;
-    if let Some(set) = table.get_mut(topic_name) {
-      set.remove(broker_id);
-      self.trie.lock().await.remove(topic_name, broker_id);
-    }
-  }
-
-  async fn remove_client_subscription(&self, topic_name: &str, client_id: &str) -> bool {
+  async fn remove_client_subscription(&self, topic: &str, client_id: &str) -> bool {
     let mut table = self.subscription_table.lock().await;
-    if let Some(map) = table.get_mut(topic_name) {
+    if let Some(map) = table.get_mut(topic) {
       map.remove(client_id);
       map.is_empty()
     } else {
       true
     }
-  }
-
-  async fn forward_subscription(&self, topic_name: &str) -> Result<()> {
-    // TODO send the subscription to other broker
-    Ok(())
-  }
-  
-  async fn forward_packet(&self, packet: &PublishPacket, broker_id: &str) -> Result<()> {
-    // TODO forward to packet to appropricate brokers
-    Ok(())
   }
 
   async fn forward_packet_to_clients(&self, packet: &PublishPacket, topic: &str) -> Result<()> {
@@ -174,7 +163,7 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
         };
 
         let packet_to_publish = PublishPacket {
-          topic_name: packet.topic_name.to_owned(),
+          topic: packet.topic.to_owned(),
           packet_id: packet_id,
           payload: packet.payload.to_owned(),
           config: PublishConfig {
@@ -201,7 +190,12 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
     Ok(true)
   }
 
-  async fn handle_new_connection(&self, client_id: &str, packet: &ConnectPacket) -> Result<()> {
+  async fn handle_new_connection(&self, client_id: &str, packet: &ConnectPacket, client_credential: &ClientCredential) -> Result<()> {
+    if !(self.authenticator.connect)(&client_credential) {
+      return Err(HerdMQError::NotAuthorized);
+    }
+    println!("New client connection: {}", client_id);
+
     let properties = vec![
       Property::MaximumQoS(1),
       Property::WildcardSubscriptionAvailable(false)
@@ -218,10 +212,10 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
       })).await?;
     } else {
       let subscriptions = self.storage.find_client_subscriptions(&client_id).await?;
-      for (topic_name, qos) in &subscriptions {
-        self.insert_client_subscription(topic_name, client_id, *qos).await;
-        if self.insert_broker_subscription(topic_name, &self.broker_id).await {
-          self.forward_subscription(topic_name).await?;
+      for (topic, qos) in &subscriptions {
+        self.insert_client_subscription(topic, client_id, *qos).await;
+        if self.cluster_client.insert_broker_subscription(topic, &self.broker_id).await {
+          self.cluster_client.forward_subscription(topic).await?;
         }
       }
 
@@ -233,9 +227,9 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
 
       let packets = self.storage.get_packets_for_client(&client_id).await?; 
       
-      for (packet_id, (topic_name, message)) in &packets {
+      for (packet_id, (topic, message)) in &packets {
         self.send_to_client(&client_id, DecodedPacket::Publish(PublishPacket {
-          topic_name: topic_name.to_owned(),
+          topic: topic.to_owned(),
           packet_id: Some(*packet_id),
           payload: message.to_owned(),
           config: PublishConfig {
@@ -259,12 +253,12 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
     };
 
     for subscription in packet.subscriptions.iter() {
-      if (self.authenticator.subscribe)(&client_credential, &subscription.topic_name) {
+      if (self.authenticator.subscribe)(&client_credential, &subscription.topic) {
         subscriptions.push(subscription.clone());
 
-        self.insert_client_subscription(&subscription.topic_name, client_id, subscription.qos).await;
-        if self.insert_broker_subscription(&subscription.topic_name, &self.broker_id).await {
-          self.forward_subscription(&subscription.topic_name).await?;
+        self.insert_client_subscription(&subscription.topic, client_id, subscription.qos).await;
+        if self.cluster_client.insert_broker_subscription(&subscription.topic, &self.broker_id).await {
+          self.cluster_client.forward_subscription(&subscription.topic).await?;
         }
 
         let reason_code = match subscription.qos {
@@ -274,10 +268,10 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
         reason_codes.push(reason_code);
 
         // get the retain messages
-        let retain_messages = self.storage.get_retain_message(&subscription.topic_name).await?;
-        for (topic_name, retain_message) in &retain_messages {
+        let retain_messages = self.storage.get_retain_message(&subscription.topic).await?;
+        for (topic, retain_message) in &retain_messages {
           self.send_to_client(&client_id, DecodedPacket::Publish(PublishPacket {
-            topic_name: topic_name.to_owned(),
+            topic: topic.to_owned(),
             packet_id: None,
             payload: retain_message.to_owned(),
             config: PublishConfig {
@@ -311,63 +305,59 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
       None => return Err(HerdMQError::MPSCError)
     };
 
-    if (self.authenticator.publish)(&client_credential, &packet.topic_name) {
-      // store retain packet
-      if packet.config.retain {
-        if packet.payload == "" {
-          self.storage.remove_retain_message(&packet.topic_name).await?;
-        } else {
-          self.storage.store_retain_message(&packet.topic_name, &packet.payload).await?;
-        }
-      }
+    if !(self.authenticator.publish)(&client_credential, &packet.topic) {
+      return Err(HerdMQError::NotAuthorized);
+    }
 
-      // handle qos = 1
-      if packet.config.qos > 0 {
-        let packet_id = packet.packet_id.ok_or_else(|| Error::FormatError)?;
-
-        // store offline packets
-        let subscriptions = self.storage.find_subscriptions(&packet.topic_name).await?;
-
-        for (cid, subscription_config) in subscriptions.iter() {
-          if subscription_config.qos > 0 {
-            self.storage.store_packet_for_client(&cid, &packet.topic_name, &packet.payload, packet_id).await?;
-          }
-        }
-
-        // send puback
-        self.send_to_client(&client_id, DecodedPacket::Puback(PubackPacket {
-          packet_id: packet_id,
-          reason_code: ReasonCode::Success,
-          properties: vec![]
-        })).await?;
-      }
-
-      let subscriptions = self.trie.lock().await.get(&packet.topic_name);
-
-      for (topic, broker_ids) in subscriptions {
-        // this could potentially happens in other threads
-        for broker_id in broker_ids {
-          if broker_id == *self.broker_id {
-            self.forward_packet_to_clients(&packet, &topic).await?;
-          } else {
-            self.forward_packet(&packet, &broker_id).await?;
-          }
-        }
-      }
-    } else {
-      // send puback
-      if packet.config.qos > 0 {
-        let packet_id = packet.packet_id.ok_or_else(|| Error::FormatError)?;
-        self.send_to_client(&client_id, DecodedPacket::Puback(PubackPacket {
-          packet_id: packet_id,
-          reason_code: ReasonCode::NotAuthorized,
-          properties: vec![]
-        })).await?;
+    // store retain packet
+    if packet.config.retain {
+      if packet.payload == "" {
+        self.storage.remove_retain_message(&packet.topic).await?;
+      } else {
+        self.storage.store_retain_message(&packet.topic, &packet.payload).await?;
       }
     }
+
+    // handle qos = 1
+    if packet.config.qos > 0 {
+      let packet_id = packet.packet_id.ok_or_else(|| Error::FormatError)?;
+
+      // store offline packets
+      let subscriptions = self.storage.find_subscriptions(&packet.topic).await?;
+
+      for (cid, subscription_config) in subscriptions.iter() {
+        if subscription_config.qos > 0 {
+          self.storage.store_packet_for_client(&cid, &packet.topic, &packet.payload, packet_id).await?;
+        }
+      }
+
+      // send puback
+      self.send_to_client(&client_id, DecodedPacket::Puback(PubackPacket {
+        packet_id: packet_id,
+        reason_code: ReasonCode::Success,
+        properties: vec![]
+      })).await?;
+    }
+
+    let subscriptions = self.cluster_client.trie.lock().await.get(&packet.topic);
+
+    // Don't publish to the same broker twice
+    let mut published_broker = HashSet::new();
+    for (topic, broker_ids) in subscriptions {
+      for broker_id in broker_ids {
+        if broker_id == *self.broker_id {
+          self.forward_packet_to_clients(&packet, &topic).await?;
+        } else {
+          if !published_broker.contains(&broker_id) {
+            published_broker.insert(broker_id.to_owned());
+            self.cluster_client.forward_packet(&packet, &broker_id).await?;
+          }
+        }
+      }
+    }
+    
     Ok(())
   }
-
   
   async fn handle_message(&self, client_id: String, message: BrokerMessage) -> Result<()> {
     match message {
@@ -383,9 +373,9 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
           (connection_tx, packet.will_config.clone(), client_credential.clone())
         );
 
-        if (self.authenticator.connection)(&client_credential) {
-          self.handle_new_connection(&client_id, &packet).await?;
-        } else {
+        let result = self.handle_new_connection(&client_id, &packet, &client_credential).await;
+
+        if let Err(_) = result {
           self.send_to_client(&client_id, DecodedPacket::Connack(ConnackPacket {
             session_present: false,
             reason_code: ReasonCode::NotAuthorized,
@@ -395,7 +385,18 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
         }
       }
       BrokerMessage::Publish(packet) => {
-        self.handle_publish(&client_id, &packet).await?;
+        let result = self.handle_publish(&client_id, &packet).await;
+
+        if let Err(_) = result {
+          if packet.config.qos > 0 {
+            let packet_id = packet.packet_id.ok_or_else(|| Error::FormatError)?;
+            self.send_to_client(&client_id, DecodedPacket::Puback(PubackPacket {
+              packet_id: packet_id,
+              reason_code: ReasonCode::NotAuthorized,
+              properties: vec![]
+            })).await?;
+          }
+        }
       }
       BrokerMessage::Puback(packet) => {
         self.storage.remove_packet_for_client(&client_id, packet.packet_id).await?;
@@ -404,11 +405,11 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
         self.handle_subscribe(&client_id, &packet).await?;
       }
       BrokerMessage::Unsubscribe(packet) => {
-        self.storage.remove_subscriptions(&client_id, &packet.topic_names).await?;
+        self.storage.remove_subscriptions(&client_id, &packet.topics).await?;
 
-        for topic in &packet.topic_names {
+        for topic in &packet.topics {
           if self.remove_client_subscription(topic, &client_id).await {
-            self.remove_broker_subscription(topic, &self.broker_id).await;
+            self.cluster_client.remove_broker_subscription(topic, &self.broker_id).await?;
           }
         }
 
@@ -425,9 +426,9 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
         };
 
         let subscriptions = self.storage.find_client_subscriptions(&client_id).await?;
-        for (topic_name, _) in &subscriptions {
-          if self.remove_client_subscription(topic_name, &client_id).await {
-            self.remove_broker_subscription(topic_name, &self.broker_id).await;
+        for (topic, _) in &subscriptions {
+          if self.remove_client_subscription(topic, &client_id).await {
+            self.cluster_client.remove_broker_subscription(topic, &self.broker_id).await?;
           }
         }
 
@@ -442,7 +443,7 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
           }
 
           self.handle_publish(&client_id, &PublishPacket {
-            topic_name: will_config.topic_name,
+            topic: will_config.topic,
             packet_id: packet_id,
             payload: will_config.payload,
             config: PublishConfig {
@@ -454,6 +455,17 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
           }).await?;
         };
       }
+      BrokerMessage::ClusterForward(packet) => {
+        let subscriptions = self.cluster_client.trie.lock().await.get(&packet.topic);
+
+        for (topic, broker_ids) in subscriptions {
+          for broker_id in broker_ids {
+            if broker_id == *self.broker_id {
+              self.forward_packet_to_clients(&packet, &topic).await?;
+            }
+          }
+        }
+      }
     }
 
     Ok(())
@@ -462,10 +474,14 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static
 
 #[derive(Debug)]
 pub enum BrokerMessage {
+  // connection messages
   NewConnection(Sender<DecodedPacket>, ConnectPacket),
   Publish(PublishPacket),
   Puback(PubackPacket),
   Subscribe(SubscribePacket),
   Unsubscribe(UnsubscribePacket),
-  CloseConnection
+  CloseConnection,
+
+  // cluster messages
+  ClusterForward(PublishPacket)
 }

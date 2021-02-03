@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+#[derive(Debug)]
 struct TrieNode {
   value: HashSet<String>,
   children: HashMap<String, Self>
@@ -49,6 +50,7 @@ impl TrieNode {
   }
 }
 
+#[derive(Debug)]
 pub struct TopicTrie {
   root: TrieNode
 }
@@ -78,6 +80,13 @@ impl TopicTrie {
   pub fn remove(&mut self, topic: &str, value: &str) {
     let topic_levels: Vec<&str> = topic.split("/").collect();
     self.root.remove(&topic_levels, value);
+  }
+
+  pub fn clear(&mut self) {
+    self.root = TrieNode {
+      value: HashSet::new(),
+      children: HashMap::new()
+    }
   }
 }
 
