@@ -17,5 +17,4 @@ cdrs-tokio = "2.0.0"
 regex = "1"
 getopts = "0.2"
 uuid = { version = "0.8", features = ["v4"] }
-mqtt-client = { path = "../mqtt-client" }
 serde_json = "1.0"

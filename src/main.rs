@@ -7,6 +7,7 @@ mod trie;
 mod authenticator;
 mod cluster;
 
+use std::env;
 use tokio::runtime;
 use getopts::Options;
 use uuid::Uuid;
@@ -50,8 +51,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   opts.optflag("h", "help", "print this help menu");
 
   let matches = match opts.parse(&args[1..]) {
-    Ok(m) => { m }
-    Err(f) => { panic!(f.to_string()) }
+    Ok(m) => m,
+    Err(f) => panic!(f.to_string())
   };
 
   if matches.opt_present("h") {
@@ -72,17 +73,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     None => 3883
   };
 
+  let storage_urls = env::var("STORAGE_URLS").unwrap_or("127.0.0.1:9042".to_owned());
+
   let rt = runtime::Runtime::new()?;
 
   rt.block_on(async {
     let broker_id = format!("{}_{}", BROKER_PREFIX, Uuid::new_v4().to_string());
     let authenticator = Authenticator::new(authenticate_connect, authenticate_subscribe, authenticate_publish);
-    let storage = Storage::new(Vec::from(["127.0.0.1:9042", "127.0.0.1:9043"])).await.unwrap();
+    let storage = Storage::new(storage_urls.split(',').collect()).await.unwrap();
 
     let broker = Broker::new(broker_id, authenticator, storage);
 
     broker.run(("0.0.0.0", port), ("0.0.0.0", cluster_port), seeds).await.unwrap();
   });
-  
+
   Ok(())
 }

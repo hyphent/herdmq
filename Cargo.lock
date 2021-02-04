@@ -247,7 +247,6 @@ dependencies = [
  "cdrs-tokio",
  "futures-util",
  "getopts",
- "mqtt-client",
  "mqtt-codec",
  "rand 0.8.2",
  "regex",
@@ -347,19 +346,6 @@ checksum = "5a33c1b55807fbed163481b5ba66db4b2fa6cde694a5027be10fb724206c5897"
 dependencies = [
  "socket2",
  "winapi",
-]
-
-[[package]]
-name = "mqtt-client"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "getopts",
- "mqtt-codec",
- "rand 0.8.2",
- "tokio",
- "tokio-util",
- "uuid",
 ]
 
 [[package]]
