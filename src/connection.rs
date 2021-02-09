@@ -141,9 +141,9 @@ Connection<A, B> {
   pub async fn listen(self) -> Result<()> {
     let last_ping = Arc::new(Mutex::new(SystemTime::now()));
     tokio::select! {
-      _ = Self::check_idle_connection(last_ping.clone()) => {},
-      _ = Self::handle_client_message(self.stream, self.broker_tx.clone(), self.tx, self.client_id.to_owned(), last_ping) => {},
-      _ = Self::handle_broker_message(self.sink, self.rx) => {}
+      _ = Self::check_idle_connection(last_ping.clone()) => (),
+      _ = Self::handle_client_message(self.stream, self.broker_tx.clone(), self.tx, self.client_id.to_owned(), last_ping) => (),
+      _ = Self::handle_broker_message(self.sink, self.rx) => ()
     }
     Self::send_to_server(&self.broker_tx, BrokerMessage::CloseConnection, &self.client_id).await?;
     Ok(())
