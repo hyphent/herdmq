@@ -126,8 +126,8 @@ impl ClusterClient {
     Ok(())
   }
 
-  pub async fn run<T: ToSocketAddrs>(&self, url: T) -> Result<()> {
-    let listener = TcpListener::bind(url).await?;
+  pub async fn run(&self, port: u16) -> Result<()> {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     while let Ok((socket, _addr)) = listener.accept().await {
       let tx = self.tx.clone();
       let client_id = self.id.to_string();

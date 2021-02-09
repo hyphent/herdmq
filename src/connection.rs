@@ -34,18 +34,18 @@ const MAX_PING_INTERVAL: u128 = (60000 as f64 * 1.5) as u128;
 
 type DecodedPacketResult = std::result::Result<DecodedPacket, DecodeError>;
 
-pub struct Connection<SI: Sink<DecodedPacket, Error=EncodeError>, ST: Stream<Item=DecodedPacketResult>> {
+pub struct Connection<A: Sink<DecodedPacket, Error=EncodeError>, B: Stream<Item=DecodedPacketResult>> {
   client_id: String,
-  sink: SI,
-  stream: ST,
+  sink: A,
+  stream: B,
   broker_tx: Sender<(String, BrokerMessage)>,
   rx: Receiver<DecodedPacket>,
   tx: Sender<DecodedPacket>
 }
 
-impl <SI: Sink<DecodedPacket, Error=EncodeError> + Unpin, ST: Stream<Item=DecodedPacketResult> + Unpin>
-Connection<SI, ST> {
-  pub async fn handle_handshake(mut sink: SI, mut stream: ST, broker_tx: Sender<(String, BrokerMessage)>) -> Result<Self> {
+impl <A: Sink<DecodedPacket, Error=EncodeError> + Unpin, B: Stream<Item=DecodedPacketResult> + Unpin>
+Connection<A, B> {
+  pub async fn handle_handshake(mut sink: A, mut stream: B, broker_tx: Sender<(String, BrokerMessage)>) -> Result<Self> {
     let first_packet = match time::timeout(Duration::from_millis(CONNECTION_TIMEOUT), stream.next()).await.map_err(|_| Error::TimeoutError)?.unwrap() {
       Ok(packet) => packet,
       Err(DecodeError::ProtocolNotSupportedError) => {
@@ -96,7 +96,7 @@ Connection<SI, ST> {
     *last_ping = SystemTime::now();
   }
 
-  async fn handle_client_message(mut stream: ST, broker_tx: Sender<(String, BrokerMessage)>, tx: Sender<DecodedPacket>, client_id: String, last_ping: Arc<Mutex<SystemTime>>) -> Result<()> {
+  async fn handle_client_message(mut stream: B, broker_tx: Sender<(String, BrokerMessage)>, tx: Sender<DecodedPacket>, client_id: String, last_ping: Arc<Mutex<SystemTime>>) -> Result<()> {
     while let Some(Ok(decoded_packet)) = stream.next().await {
       Self::reset_ping(&last_ping).await;
 
@@ -122,7 +122,7 @@ Connection<SI, ST> {
     Ok(())
   }
 
-  async fn handle_broker_message(mut sink: SI, mut rx: Receiver<DecodedPacket>) -> Result<()> {
+  async fn handle_broker_message(mut sink: A, mut rx: Receiver<DecodedPacket>) -> Result<()> {
     while let Some(message) = rx.recv().await {
       sink.send(message).await?;
     }

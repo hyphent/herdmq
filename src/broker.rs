@@ -85,8 +85,8 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
     Ok(())
   }
 
-  async fn run_mqtt_server<T: ToSocketAddrs>(url: T, tx: Sender<(String, BrokerMessage)>) -> Result<()> {
-    let listener = TcpListener::bind(url).await?;
+  async fn run_mqtt_server(port: u16, tx: Sender<(String, BrokerMessage)>) -> Result<()> {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     loop {
       let (socket, _addr) = listener.accept().await.unwrap();
       let tx = tx.clone();
@@ -98,8 +98,8 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
     }
   }
 
-  async fn run_websocket_server<T: ToSocketAddrs>(url: T, tx: Sender<(String, BrokerMessage)>) -> Result<()> {
-    let listener = TcpListener::bind(url).await?;
+  async fn run_websocket_server(port: u16, tx: Sender<(String, BrokerMessage)>) -> Result<()> {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     loop {
       let (socket, _addr) = listener.accept().await.unwrap();
       let tx = tx.clone();
@@ -125,7 +125,7 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
     }
   }
 
-  pub async fn run<A: ToSocketAddrs, B: 'static + ToSocketAddrs + Send, T: ToSocketAddrs>(self, url: A, cluster_url: B, seeds: Vec<T>) -> Result<()> {
+  pub async fn run<T: ToSocketAddrs>(self, port: u16, websocket_port: u16, cluster_port: u16, seeds: Vec<T>) -> Result<()> {
     let cluster_client = Arc::new(ClusterClient::new(&self.id));
     let cluster_runner = cluster_client.clone();
     let cluster_handler = cluster_client.clone();
@@ -134,7 +134,7 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
     let cloned_tx = tx.clone();
 
     tokio::spawn(async move {
-      cluster_runner.run(cluster_url).await.unwrap();
+      cluster_runner.run(cluster_port).await.unwrap();
     });
 
     tokio::spawn(async move {
@@ -153,8 +153,8 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
 
     println!("HerdMQ is ready!!");
     tokio::select! {
-      _ = Self::run_mqtt_server(url, tx.clone()) => (),
-      _ = Self::run_websocket_server(("0.0.0.0", 5000), tx.clone()) => (),
+      _ = Self::run_mqtt_server(port, tx.clone()) => (),
+      _ = Self::run_websocket_server(websocket_port, tx.clone()) => (),
     }
     Ok(())
   }

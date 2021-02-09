@@ -46,6 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut opts = Options::new();
 
   opts.optopt("p", "port", "port for the herdmq instance", "port");
+  opts.optopt("w", "ws-port", "websocket port for the herdmq instance", "port");
   opts.optopt("c", "cluster", "port for cluster client", "port");
   opts.optopt("s", "seeds", "seeds for discovering herdmq cluster", "url");
   opts.optflag("h", "help", "print this help menu");
@@ -68,6 +69,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Some(port) => port.parse::<u16>().unwrap(),
     None => 1883
   };
+  let websocket_port = match matches.opt_str("w") {
+    Some(port) => port.parse::<u16>().unwrap(),
+    None => 5000
+  };
   let cluster_port = match matches.opt_str("c") {
     Some(port) => port.parse::<u16>().unwrap(),
     None => 3883
@@ -84,7 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let broker = Broker::new(broker_id, authenticator, storage);
 
-    broker.run(("0.0.0.0", port), ("0.0.0.0", cluster_port), seeds).await.unwrap();
+    broker.run(port, websocket_port, cluster_port, seeds).await.unwrap();
   });
 
   Ok(())
