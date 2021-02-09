@@ -1,7 +1,8 @@
 use std::{
   collections::{HashMap, HashSet},
-  sync::Arc
+  sync::Arc,
 };
+use tokio_util::codec::{Framed, FramedParts};
 
 use tokio::{
   net::{TcpListener, ToSocketAddrs},
@@ -11,9 +12,18 @@ use tokio::{
   }
 };
 
+use futures_util::{
+  stream::StreamExt,
+  sink::SinkExt
+};
+
 use rand::Rng;
 
-use mqtt_codec::types::*;
+use mqtt_codec::{
+  types::*,
+  codec::MQTTCodec,
+  websocket::{WebsocketUpgradeCodec, WebsocketCodec},
+};
 
 use crate::{
   types::{Result, Error, ClientCredential},
@@ -75,6 +85,46 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
     Ok(())
   }
 
+  async fn run_mqtt_server<T: ToSocketAddrs>(url: T, tx: Sender<(String, BrokerMessage)>) -> Result<()> {
+    let listener = TcpListener::bind(url).await?;
+    loop {
+      let (socket, _addr) = listener.accept().await.unwrap();
+      let tx = tx.clone();
+      tokio::spawn(async move {
+        let (sink, stream) = Framed::new(socket, MQTTCodec {}).split();
+        let connection = Connection::handle_handshake(sink, stream, tx).await.unwrap();
+        connection.listen().await.unwrap();
+      });
+    }
+  }
+
+  async fn run_websocket_server<T: ToSocketAddrs>(url: T, tx: Sender<(String, BrokerMessage)>) -> Result<()> {
+    let listener = TcpListener::bind(url).await?;
+    loop {
+      let (socket, _addr) = listener.accept().await.unwrap();
+      let tx = tx.clone();
+      tokio::spawn(async move {
+        let mut frame = Framed::new(socket, WebsocketUpgradeCodec {});
+        if let Some(Ok(websocket_key)) = frame.next().await {
+          frame.send(websocket_key).await.unwrap();
+          let frame_parts = frame.into_parts();
+
+          let temp = FramedParts::new(frame_parts.io, WebsocketCodec::new());          
+          let mut new_frame_parts = Framed::from_parts(temp).into_parts();
+
+          // send over whatever is remained
+          new_frame_parts.read_buf = frame_parts.read_buf;
+          new_frame_parts.write_buf = frame_parts.write_buf;
+
+          let (sink, stream) = Framed::from_parts(new_frame_parts).split();
+
+          let connection = Connection::handle_handshake(sink, stream, tx).await.unwrap();
+          connection.listen().await.unwrap();
+        }
+      });
+    }
+  }
+
   pub async fn run<A: ToSocketAddrs, B: 'static + ToSocketAddrs + Send, T: ToSocketAddrs>(self, url: A, cluster_url: B, seeds: Vec<T>) -> Result<()> {
     let cluster_client = Arc::new(ClusterClient::new(&self.id));
     let cluster_runner = cluster_client.clone();
@@ -97,21 +147,16 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
       }
     }
 
-    println!("HerdMQ is ready!!");
-    let listener = TcpListener::bind(url).await.unwrap();
-
     tokio::spawn(async move {
       self.listen(rx, cluster_client).await.unwrap();
     });
 
-    loop {
-      let (socket, _addr) = listener.accept().await.unwrap();
-      let tx = tx.clone();
-      tokio::spawn(async move {
-        let connection = Connection::handle_handshake(socket, tx).await.unwrap();
-        connection.listen().await.unwrap();
-      });
+    println!("HerdMQ is ready!!");
+    tokio::select! {
+      _ = Self::run_mqtt_server(url, tx.clone()) => (),
+      _ = Self::run_websocket_server(("0.0.0.0", 5000), tx.clone()) => (),
     }
+    Ok(())
   }
 }
 
@@ -320,7 +365,7 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
 
     // handle qos = 1
     if packet.config.qos > 0 {
-      let packet_id = packet.packet_id.ok_or_else(|| Error::FormatError)?;
+      let packet_id = packet.packet_id.ok_or(Error::FormatError)?;
 
       // store offline packets
       let subscriptions = self.storage.find_subscriptions(&packet.topic).await?;
@@ -454,6 +499,7 @@ P: Fn(&ClientCredential, &str) -> bool + Sync + Send + 'static,
             properties: vec![]
           }).await?;
         };
+        println!("Connection closed: {}", client_id);
       }
       BrokerMessage::ClusterForward(packet) => {
         let subscriptions = self.cluster_client.trie.lock().await.get(&packet.topic);

@@ -1,6 +1,4 @@
-use tokio_util::codec::Framed;
 use tokio::{
-  net::TcpStream,
   sync::{
     Mutex, 
     mpsc::{Sender, Receiver, channel}
@@ -13,42 +11,57 @@ use std::{
   time::SystemTime
 };
 
-use futures_util::{sink::SinkExt, stream::{StreamExt, SplitStream, SplitSink}};
+use futures_util::{
+  sink::{Sink, SinkExt}, 
+  stream::{Stream, StreamExt}
+};
 
 use mqtt_codec::{
-  codec::MQTTCodec,
-  types::{DecodedPacket, PingRespPacket, ReasonCode}
+  types::{DecodedPacket, PingRespPacket, ReasonCode, ConnackPacket},
+  error::{EncodeError, DecodeError}
 };
 
 use crate::{
-  error::HerdMQError,
-  types::Result,
+  types::{Result, Error},
   broker::BrokerMessage
 };
 
-const CONNECTION_TIMEOUT: u64 = 2000;
+// TODO change connection timeout back to 2 seconds
+const CONNECTION_TIMEOUT: u64 = 15000;
 const CHANNEL_CAPACITY: usize = 10;
 const PING_CHECK_INTERVAL: u64 = 10000;
 const MAX_PING_INTERVAL: u128 = (60000 as f64 * 1.5) as u128;
 
-pub struct Connection {
+type DecodedPacketResult = std::result::Result<DecodedPacket, DecodeError>;
+
+pub struct Connection<SI: Sink<DecodedPacket, Error=EncodeError>, ST: Stream<Item=DecodedPacketResult>> {
   client_id: String,
-  sink: SplitSink<Framed<TcpStream, MQTTCodec>, DecodedPacket>,
-  stream: SplitStream<Framed<TcpStream, MQTTCodec>>,
+  sink: SI,
+  stream: ST,
   broker_tx: Sender<(String, BrokerMessage)>,
   rx: Receiver<DecodedPacket>,
   tx: Sender<DecodedPacket>
 }
 
-impl Connection {
-  pub async fn handle_handshake(socket: TcpStream, broker_tx: Sender<(String, BrokerMessage)>) -> Result<Self> {
-    let mut frame = Framed::new(socket, MQTTCodec {});
-    let first_packet = time::timeout(Duration::from_millis(CONNECTION_TIMEOUT), frame.next())
-      .await.map_err(|_| HerdMQError::TimeoutError)?.unwrap()?;
+impl <SI: Sink<DecodedPacket, Error=EncodeError> + Unpin, ST: Stream<Item=DecodedPacketResult> + Unpin>
+Connection<SI, ST> {
+  pub async fn handle_handshake(mut sink: SI, mut stream: ST, broker_tx: Sender<(String, BrokerMessage)>) -> Result<Self> {
+    let first_packet = match time::timeout(Duration::from_millis(CONNECTION_TIMEOUT), stream.next()).await.map_err(|_| Error::TimeoutError)?.unwrap() {
+      Ok(packet) => packet,
+      Err(DecodeError::ProtocolNotSupportedError) => {
+        sink.send(DecodedPacket::Connack(ConnackPacket {
+          session_present: false,
+          reason_code: ReasonCode::UnsupportedProtocolVersion,
+          properties: vec![]
+        })).await?; 
+        return Err(DecodeError::ProtocolNotSupportedError.into());
+      },
+      Err(error) => return Err(error.into())
+    };
   
     let connect_packet = match first_packet {
       DecodedPacket::Connect(packet) => packet,
-      _ => return Err(HerdMQError::FormatError)
+      _ => return Err(Error::FormatError)
     };
 
     let (tx, mut rx) = channel(CHANNEL_CAPACITY);
@@ -57,13 +70,12 @@ impl Connection {
 
     if let Some(DecodedPacket::Connack(packet)) = rx.recv().await {
       let reason_code = packet.reason_code;
-      frame.send(DecodedPacket::Connack(packet)).await?;
+      sink.send(DecodedPacket::Connack(packet)).await?;
       if reason_code == ReasonCode::NotAuthorized {
-        return Err(HerdMQError::NotAuthorized);
+        return Err(Error::NotAuthorized);
       }
     }
 
-    let (sink, stream) = frame.split();
     Ok(Connection {
       client_id: connect_packet.client_id,
       sink,
@@ -75,7 +87,7 @@ impl Connection {
   }
 
   async fn send_to_server(broker_tx: &Sender<(String, BrokerMessage)>, message: BrokerMessage, client_id: &str) -> Result<()> {
-    broker_tx.send((client_id.to_owned(), message)).await.map_err(|_| HerdMQError::MPSCError)?;
+    broker_tx.send((client_id.to_owned(), message)).await.map_err(|_| Error::MPSCError)?;
     Ok(())
   }
 
@@ -84,8 +96,7 @@ impl Connection {
     *last_ping = SystemTime::now();
   }
 
-  async fn handle_client_message(mut stream: SplitStream<Framed<TcpStream, MQTTCodec>>, broker_tx: Sender<(String, BrokerMessage)>, 
-    tx: Sender<DecodedPacket>, client_id: String, last_ping: Arc<Mutex<SystemTime>>) -> Result<()> {
+  async fn handle_client_message(mut stream: ST, broker_tx: Sender<(String, BrokerMessage)>, tx: Sender<DecodedPacket>, client_id: String, last_ping: Arc<Mutex<SystemTime>>) -> Result<()> {
     while let Some(Ok(decoded_packet)) = stream.next().await {
       Self::reset_ping(&last_ping).await;
 
@@ -103,15 +114,15 @@ impl Connection {
           Self::send_to_server(&broker_tx, BrokerMessage::Unsubscribe(packet.clone()), &client_id).await?;
         }
         DecodedPacket::PingReq(_) => {
-          tx.send(DecodedPacket::PingResp(PingRespPacket {})).await.map_err(|_| HerdMQError::MPSCError)?;
+          tx.send(DecodedPacket::PingResp(PingRespPacket {})).await.map_err(|_| Error::MPSCError)?;
         }
-        _ => {}
+        _ => ()
       }
     }
     Ok(())
   }
 
-  async fn handle_broker_message(mut sink: SplitSink<Framed<TcpStream, MQTTCodec>, DecodedPacket>, mut rx: Receiver<DecodedPacket>) -> Result<()> {
+  async fn handle_broker_message(mut sink: SI, mut rx: Receiver<DecodedPacket>) -> Result<()> {
     while let Some(message) = rx.recv().await {
       sink.send(message).await?;
     }
