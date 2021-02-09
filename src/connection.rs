@@ -26,8 +26,7 @@ use crate::{
   broker::BrokerMessage
 };
 
-// TODO change connection timeout back to 2 seconds
-const CONNECTION_TIMEOUT: u64 = 15000;
+const CONNECTION_TIMEOUT: u64 = 2000;
 const CHANNEL_CAPACITY: usize = 10;
 const PING_CHECK_INTERVAL: u64 = 10000;
 const MAX_PING_INTERVAL: u128 = (60000 as f64 * 1.5) as u128;
