@@ -25,7 +25,10 @@ To get more information on the available, such as specifying the port, options f
 
 
 # Features
+- MQTTv5 Protocol
 - Message Persistence
+- Last-Will Messages
+- Retain Messages
 - Clustered MQTT Brokers
 - QOS 0 and 1
 - Multi-level wildcards
